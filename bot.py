@@ -40,6 +40,7 @@ intents.emojis = True
 intents.guilds = True
 bot = commands.Bot(command_prefix='+', intents=intents)
 
+
 load_dotenv()
 nest_asyncio.apply()
 
@@ -83,32 +84,39 @@ def get_sequence(n):
 # =========================
 # 🏆 USER SCORE MANAGEMENT
 # =========================
-def checkuser(user_id):
+def checkuser(user_id, guild_id):
     doc = scores_collection.find_one({"_id": user_id})
     if doc is None:
-        scores_collection.insert_one({"_id": user_id, "correct": 0, "wrong": 0})
+        scores_collection.insert_one({"_id": user_id, "correct": 0, "wrong": 0,"stats": {"guild_id":guild_id ,"correct": 0, "wrong": 0,}})
+        return False
+    doc = scores_collection.find_one({"_id": user_id, "stats.guild_id": guild_id})
+    if doc is None:
+        scores_collection.insert_one(
+            {"_id": user_id},
+            {"$push": {"stats": {"guild_id": guild_id, "correct": 0, "wrong": 0}}}
+        )
         return False
     return True
 
     
 
-def update_user_score(user_id):
-    checkuser(user_id)  # Ensure user exists in the collection
+def update_user_score(user_id,guild_id):
+    checkuser(user_id,guild_id)  # Ensure user exists in the collection
     scores_collection.update_one(
-        {"_id": user_id},
-        {"$inc": {"correct": 1}},
+        {"_id": user_id ,"stats.guild_id": guild_id},
+        {"$inc": {"correct": 1,"stats.$.correct": 1}},
         upsert=True
     )
 
-def update_wrong_score(user_id):
-    checkuser(user_id)  # Ensure user exists in the collection
+def update_wrong_score(user_id,guild_id):
+    checkuser(user_id,guild_id)  # Ensure user exists in the collection
     scores_collection.update_one(
-        {"_id": user_id},
-        {"$inc": {"wrong": 1}},
+        {"_id": user_id , "stats.guild_id": guild_id},
+        {"$inc": {"wrong": 1 ,"stats.$.wrong": 1}},
         upsert=True
     )   
 
-def get_user_score(user_id):
+def get_user_score(user_id, guild_id):
     doc = scores_collection.find_one({"_id": user_id})
     if doc is None:
         return {"correct": 0, "wrong": 0, "accuracy": 0}
@@ -117,7 +125,14 @@ def get_user_score(user_id):
     wrong = doc.get("wrong", 0)
     total = correct + wrong
     accuracy = (correct / total) * 100 if total > 0 else 0
-    return {"correct": correct, "wrong": wrong, "accuracy": accuracy}
+    doc_stats = doc.get("stats", [])
+    guild_stats = next((stat for stat in doc_stats if stat.get("guild_id") == guild_id), None)
+    if guild_stats:
+        guild_correct = guild_stats.get("correct", 0)
+        guild_wrong = guild_stats.get("wrong", 0)
+        guild_total = guild_correct + guild_wrong
+        guild_accuracy = (guild_correct / guild_total) * 100 
+    return {"correct": correct, "wrong": wrong, "accuracy": accuracy,"guild_correct": guild_stats.get("correct", 0) if guild_stats else 0, "guild_wrong": guild_stats.get("wrong", 0) if guild_stats else 0, "guild_accuracy": guild_accuracy if guild_stats else 0}
 
 def calculate_score(user_id):
     doc = scores_collection.find_one({"_id": user_id})
@@ -130,6 +145,7 @@ def get_leaderboard():
 
 def set_leaderboard():
     users = get_leaderboard()
+    print(f"Users in leaderboard: {users}")  # Debugging line
     leaderboard_data = []
     for user in users:
         user_id = user['_id']
@@ -143,17 +159,77 @@ def set_leaderboard():
     return sorted(leaderboard_data, key=lambda x: x['score'], reverse=True)
 # =========================
 class LeaderboardView(View):
-    def __init__(self, leaderboard_data, bot):
+    def __init__(self, bot, guild_id):
         super().__init__(timeout=60)
-        self.leaderboard_data = leaderboard_data
-        self.current_page = 0
         self.bot = bot
+        self.guild_id = guild_id # Convert to string for consistent comparison
+        self.current_page = 0
         self.entries_per_page = 10
-        self.max_pages = max(1, (len(leaderboard_data) - 1) // self.entries_per_page + 1)
+        self.is_global = False  # Start with global leaderboard
+        self.leaderboard_data = self.get_leaderboard_data()
+        self.max_pages = max(1, (len(self.leaderboard_data) - 1) / self.entries_per_page + 1)
         self.update_buttons()
+    
+    def get_leaderboard_data(self):
+        if self.is_global:
+            return self.get_global_leaderboard()
+        else:
+            return self.get_server_leaderboard()
+    
+    def get_global_leaderboard(self):
+        users = get_leaderboard()
+        leaderboard_data = []
+        for user in users:
+            user_id = user['_id']
+            score = calculate_score(user_id)
+            leaderboard_data.append({
+                '_id': user_id,
+                'correct': user.get('correct', 0),
+                'wrong': user.get('wrong', 0),
+                'score': score
+            })
+        return sorted(leaderboard_data, key=lambda x: x['score'], reverse=True)
+    
+    def get_server_leaderboard(self):
+        users = get_leaderboard()
+        leaderboard_data = []
+        for user in users:
+            print(f"Processing user: {user}  lala  ")  # Debugging line
+            user_id = user['_id']
+            if(user.get('stats') is None):
+                continue
+            hellos = user.get('stats')
+            print(f"User stats: {hellos}")  # Debugging line
+            for hello in hellos:
+                if not isinstance(hello, dict):
+                    continue
+                print(f"Processing hello: {hello.get('guild_id',0)}  ")  # Debugging line
+                gu = hello.get('guild_id', 0)
+                print(f"Guild ID: {gu}, Current Guild ID: {self.guild_id}")  # Debugging line
+                if gu != self.guild_id:
+                    continue  # Skip users who don't have stats for this guild
+                correct = hello.get('correct', 0)
+                wrong = hello.get('wrong', 0)
+                score = correct - wrong
+                leaderboard_data.append({
+                    '_id': user_id,
+                    'correct': correct,
+                    'wrong': wrong,
+                    'score': score
+            })
+        return sorted(leaderboard_data, key=lambda x: x['score'], reverse=True)
     
     def update_buttons(self):
         self.clear_items()
+        
+        # Toggle button
+        toggle_button = Button(
+            label="Server Leaderboard" if self.is_global else "Global Leaderboard", 
+            style=discord.ButtonStyle.primary
+        )
+        toggle_button.callback = self.toggle_leaderboard
+        self.add_item(toggle_button)
+        
         # Previous button
         prev_button = Button(label="Previous", style=discord.ButtonStyle.secondary, disabled=self.current_page == 0)
         prev_button.callback = self.previous_page
@@ -167,6 +243,19 @@ class LeaderboardView(View):
         next_button = Button(label="Next", style=discord.ButtonStyle.secondary, disabled=self.current_page == self.max_pages - 1)
         next_button.callback = self.next_page
         self.add_item(next_button)
+    
+    async def toggle_leaderboard(self, interaction):
+        # Defer the response first
+        await interaction.response.defer()
+    
+        self.is_global = not self.is_global
+        self.current_page = 0
+        self.leaderboard_data = self.get_leaderboard_data()
+        self.max_pages = max(1, (len(self.leaderboard_data) - 1) // self.entries_per_page + 1)
+        self.update_buttons()
+    
+        # Use edit_original_response instead of edit_message
+        await interaction.edit_original_response(embed=await self.get_embed(), view=self)
     
     async def previous_page(self, interaction):
         if self.current_page > 0:
@@ -184,6 +273,9 @@ class LeaderboardView(View):
         start_idx = self.current_page * self.entries_per_page
         end_idx = min(start_idx + self.entries_per_page, len(self.leaderboard_data))
         
+        guild = self.bot.get_guild(self.guild_id)
+        
+        # Create a cleaner, more visually spaced description
         description = ""
         for i, entry in enumerate(self.leaderboard_data[start_idx:end_idx], start=start_idx + 1):
             try:
@@ -192,16 +284,55 @@ class LeaderboardView(View):
             except:
                 username = f"User {entry['_id']}"
             
-            description += f"#{i}. **{username}** — {entry['score']} points\n"
+            # Add medal emojis for top 3
+            if i == 1:
+                medal = "🥇"
+            elif i == 2:
+                medal = "🥈"
+            elif i == 3:
+                medal = "🥉"
+            else:
+                medal = f"`#{i}`"
+            
+            # Format each entry with proper spacing and alignment
+            description += f"{medal} **{username}** → **{entry['score']}** points\n"
         
         if not description:
             description = "No scores yet!"
             
-        return discord.Embed(
-            title="🏆 Leaderboard", 
+        # Enhanced title and appearance
+        if self.is_global:
+            title = "🌎 Global Alphabet Masters"
+            color = discord.Color.blue()
+            thumbnail = "https://media.discordapp.net/attachments/1383926759866765554/1385324596047249438/1000306135-removebg-preview.png?ex=6855a791&is=68545611&hm=78a365dc3e4b30838bac82b43e6d71f7bee22399fd790e024e7937a8d1be5baa&=&width=281&height=281"  # Globe icon
+        else:
+            title = f"🏆 {guild.name} Leaderboard"
+            color = discord.Color.gold()
+            thumbnail = guild.icon.url if guild and guild.icon else None
+        
+        embed = discord.Embed(
+            title=title, 
             description=description, 
-            color=0x00ff00
+            color=color,
+            timestamp=discord.utils.utcnow()
         )
+        
+        # Ensure thumbnail is displayed
+        if thumbnail:
+            embed.set_thumbnail(url=thumbnail)
+        
+        # Add header to make the leaderboard more readable
+        embed.set_author(name=f"Top Alphabet Counters", 
+                        icon_url=self.bot.user.avatar.url if self.bot.user.avatar else None)
+        
+        # Improved footer with pagination info
+        embed.set_footer(text=f"Page {self.current_page+1}/{self.max_pages} • Use buttons to navigate")
+        
+        return embed
+
+
+
+
 # =============== MONITOR TASK ===============
 async def monitor_channel():
     await bot.wait_until_ready()
@@ -258,7 +389,7 @@ async def on_message(message):
             current_index = 1
             last_user_id = message.author.id
             user_scores[message.author.id] += 1
-            update_user_score(message.author.id)
+            update_user_score(message.author.id,message.guild.id)
             emoji = random.choice(message.guild.emojis)
             await message.add_reaction(emoji)
             ruined = False
@@ -272,18 +403,18 @@ async def on_message(message):
         if message.author.id == last_user_id:
             await message.add_reaction("❌")
             await message.channel.send("Fuck off loner")
-            update_wrong_score(message.author.id)
+            update_wrong_score(message.author.id,message.guild.id)
         else:
             emoji = random.choice(message.guild.emojis)
             await message.add_reaction(emoji)
             current_index += 1
             last_user_id = message.author.id
             user_scores[message.author.id] += 1
-            update_user_score(message.author.id)
+            update_user_score(message.author.id,message.guild.id)
     else:
         await message.add_reaction("❌")
         await message.channel.send("You ruined it asshole 😡 next alphabet is A")
-        update_wrong_score(message.author.id)
+        update_wrong_score(message.author.id,message.guild.id)
         current_index = 0
         last_user_id = None
         ruined = True
@@ -326,22 +457,8 @@ async def leaderboard(ctx):
         await ctx.send("No one has scored yet!")
         return
 
-    view = LeaderboardView(leaderboard_data, bot)
+    view = LeaderboardView( bot, ctx.guild.id)
     embed = await view.get_embed()
-    #print(f"Embed: {embed.to_dict()}")  # Debugging line
-    # Send the embed with the view
-    if embed is None:
-        embed = discord.Embed(title="🏆 Leaderboard", description="No scores yet!", color=0x00ff00)
-    elif isinstance(embed, discord.Embed):
-        embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url)
-    else:
-        # If embed is not an Embed object, create a default one
-        embed = discord.Embed(title="🏆 Leaderboard", description="No scores yet!", color=0x00ff00)
-    embed.set_thumbnail(url=ctx.guild.icon.url if ctx.guild.icon else ctx.guild.default_avatar.url)
-    embed.set_author(name=ctx.guild.name, icon_url=ctx.guild.icon.url if ctx.guild.icon else ctx.guild.default_avatar.url)
-    embed.color = discord.Color.blue()
-    embed.timestamp = ctx.message.created_at
-    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url)
     await ctx.send(embed=embed, view=view)
 
 # 👤 Command: My Stats
@@ -349,26 +466,98 @@ async def leaderboard(ctx):
 async def mystats(ctx, member: discord.Member = None):
     if member is None:
         member = ctx.author
-    score = get_user_score(member.id)
-    player_score = calculate_score(member.id)
-    description = (
-        f"👤 **{member.name}**'s Stats:\n ✅ Correct: {score['correct']}\n ❌ Wrong: {score['wrong']}\n 📊 Accuracy: {score['accuracy']:.2f}%\n 🏆 Score: {player_score}\n"
-    )
-    if player_score > 0:
-        description += " (Keep it up!)"
-    else:
-        description += " (You can do better!)"
+    guild_id = ctx.guild.id
     
-    print(f" {description}")  # Debugging line
-    # Create an embed for the stats
+    # Ensure the user exists in the scores collection
+    if not checkuser(member.id, guild_id):
+        await ctx.send(f"No stats found for {member.name}.")
+        return
+    
+    # Get the user's score
+    score = get_user_score(member.id, guild_id)
+    global_score = score['correct'] - score['wrong']
+    server_score = score['guild_correct'] - score['guild_wrong']
+    
+    # Determine color based on score performance
+    if global_score > 20:
+        color = discord.Color.gold()
+    elif global_score > 10:
+        color = discord.Color.green()
+    elif global_score > 0:
+        color = discord.Color.blue()
+    else:
+        color = discord.Color.red()
+    
+    # Create embed
     embed = discord.Embed(
-        title=f"{member.name}'s Stats",
-        description=description,
-        color=discord.Color.blue()
+        title=f"📊 {member.name}'s Alphabet Counting Stats",
+        color=color
     )
+    
+    # Add user avatar
     embed.set_thumbnail(url=member.avatar.url if member.avatar else member.default_avatar.url)
-    embed.set_footer(text=f"Requested by {ctx.author.name}", icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url)
-    # Send the embed
+    
+    # Add global stats
+    embed.add_field(
+        name="🌍 Global Stats",
+        value=(
+            f"✅ **Correct**: {score['correct']}\n"
+            f"❌ **Wrong**: {score['wrong']}\n"
+            f"📊 **Accuracy**: {score['accuracy']:.1f}%\n"
+            f"🏆 **Score**: {global_score}"
+        ),
+        inline=True
+    )
+    
+    # Add server stats
+    embed.add_field(
+        name=f"🏠 Server Stats",
+        value=(
+            f"✅ **Correct**: {score['guild_correct']}\n"
+            f"❌ **Wrong**: {score['guild_wrong']}\n"
+            f"📊 **Accuracy**: {score['guild_accuracy']:.1f}%\n"
+            f"🏆 **Score**: {server_score}"
+        ),
+        inline=True
+    )
+    
+    # Add a visual performance indicator
+    performance_message = ""
+    if global_score > 20:
+        performance_message = "🌟 You're a counting master!"
+    elif global_score > 10:
+        performance_message = "✨ Great job keeping the alphabet going!"
+    elif global_score > 0:
+        performance_message = "👍 You're contributing positively!"
+    else:
+        performance_message = "💪 Keep practicing, you'll improve!"
+    
+    embed.add_field(
+        name="💬 Performance",
+        value=performance_message,
+        inline=False
+    )
+    
+    # Create a visual representation of accuracy
+    global_bar = "■" * int(score['accuracy'] / 10) + "□" * (10 - int(score['accuracy'] / 10))
+    server_bar = "■" * int(score['guild_accuracy'] / 10) + "□" * (10 - int(score['guild_accuracy'] / 10))
+    
+    embed.add_field(
+        name="📈 Accuracy Visualization",
+        value=(
+            f"Global: {global_bar} {score['accuracy']:.1f}%\n"
+            f"Server: {server_bar} {score['guild_accuracy']:.1f}%"
+        ),
+        inline=False
+    )
+    
+    embed.set_footer(
+        text=f"Requested by {ctx.author.name}",
+        icon_url=ctx.author.avatar.url if ctx.author.avatar else ctx.author.default_avatar.url
+    )
+    
+    embed.timestamp = ctx.message.created_at
+    
     await ctx.send(embed=embed)
 
 # =========================
