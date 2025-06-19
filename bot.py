@@ -272,6 +272,7 @@ async def on_message(message):
         if message.author.id == last_user_id:
             await message.add_reaction("❌")
             await message.channel.send("Fuck off loner")
+            update_wrong_score(message.author.id)
         else:
             emoji = random.choice(message.guild.emojis)
             await message.add_reaction(emoji)
@@ -282,6 +283,7 @@ async def on_message(message):
     else:
         await message.add_reaction("❌")
         await message.channel.send("You ruined it asshole 😡 next alphabet is A")
+        update_wrong_score(message.author.id)
         current_index = 0
         last_user_id = None
         ruined = True
